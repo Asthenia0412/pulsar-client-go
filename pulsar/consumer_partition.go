@@ -1337,6 +1337,9 @@ func (pc *partitionConsumer) MessageReceived(response *pb.CommandMessage, header
 
 		// Reset the reader on the uncompressed buffer
 		reader.ResetBuffer(uncompressedHeadersAndPayload)
+	} else {
+		// Reset the reader on the decrypted buffer when no decompression is needed.
+		reader.ResetBuffer(processedPayloadBuffer)
 	}
 
 	numMsgs := 1

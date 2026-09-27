@@ -189,6 +189,73 @@ var rawBatchMessage1 = []byte{
 	0x05, 0x40, 0x00, 0x68, 0x65, 0x6c, 0x6c, 0x6f,
 }
 
+type testDecryptor struct {
+	decryptedPayload []byte
+}
+
+func (d testDecryptor) Decrypt([]byte, *pb.MessageIdData, *pb.MessageMetadata) ([]byte, error) {
+	return d.decryptedPayload, nil
+}
+
+func TestMessageReceivedUsesDecryptedBatchWithoutCompression(t *testing.T) {
+	singleMessageMetadata, err := proto.Marshal(&pb.SingleMessageMetadata{
+		PayloadSize: proto.Int32(5),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decryptedPayloadBuffer := internal.NewBufferWrapper(nil)
+	decryptedPayloadBuffer.WriteUint32(uint32(len(singleMessageMetadata)))
+	decryptedPayloadBuffer.Write(singleMessageMetadata)
+	decryptedPayloadBuffer.Write([]byte("hello"))
+	decryptedPayload := append([]byte(nil), decryptedPayloadBuffer.ReadableSlice()...)
+
+	metadata, err := proto.Marshal(&pb.MessageMetadata{
+		ProducerName:       proto.String("producer"),
+		SequenceId:         proto.Uint64(1),
+		PublishTime:        proto.Uint64(1),
+		NumMessagesInBatch: proto.Int32(1),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encryptedFrame := internal.NewBufferWrapper(nil)
+	encryptedFrame.WriteUint16(0x0e01)
+	checksumIndex := encryptedFrame.WriterIndex()
+	encryptedFrame.WriteUint32(0)
+	metadataIndex := encryptedFrame.WriterIndex()
+	encryptedFrame.WriteUint32(uint32(len(metadata)))
+	encryptedFrame.Write(metadata)
+	encryptedFrame.Write([]byte("encrypted payload"))
+	checksum := internal.Crc32cCheckSum(encryptedFrame.Get(metadataIndex, encryptedFrame.WriterIndex()-metadataIndex))
+	encryptedFrame.PutUint32(checksum, checksumIndex)
+
+	pc := partitionConsumer{
+		queueCh:              make(chan []*message, 1),
+		eventsCh:             make(chan interface{}, 1),
+		compressionProviders: sync.Map{},
+		options:              &partitionConsumerOpts{},
+		metrics:              newTestMetrics(),
+		decryptor:            testDecryptor{decryptedPayload: decryptedPayload},
+		log:                  log.DefaultNopLogger(),
+		conn:                 atomic.Pointer[internal.Connection]{},
+	}
+	pc.options.interceptors = defaultConsumerInterceptors
+	pc._setConn(dummyConnection{})
+	pc.availablePermits = &availablePermits{pc: &pc}
+	pc.ackGroupingTracker = newAckGroupingTracker(&AckGroupingOptions{MaxSize: 0}, nil, nil, nil)
+	pc.setConsumerState(consumerClosed)
+
+	if err := pc.MessageReceived(nil, encryptedFrame); err != nil {
+		t.Fatalf("MessageReceived returned an error for a valid decrypted batch: %v", err)
+	}
+
+	messages := <-pc.queueCh
+	if got, want := string(messages[0].payLoad), "hello"; got != want {
+		t.Fatalf("decrypted payload = %q, want %q", got, want)
+	}
+}
+
 var rawBatchMessage10 = []byte{
 	0x0e, 0x01, 0x7b, 0x28, 0x8c, 0x08,
 	0x00, 0x00, 0x00, 0x1f, 0x0a, 0x0f, 0x73, 0x74,
